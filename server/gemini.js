@@ -18,7 +18,7 @@ function getAI() {
  */
 export function createChatSession() {
   const chat = getAI().chats.create({
-    model: 'gemini-2.0-flash',
+    model: 'gemini-3-flash-preview',
     config: {
       systemInstruction: SYSTEM_PROMPT,
       temperature: 0.7,
@@ -44,7 +44,7 @@ export async function streamChatMessage(chat, message) {
  */
 export async function streamSingleMessage(message) {
   const response = await getAI().models.generateContentStream({
-    model: 'gemini-2.0-flash',
+    model: 'gemini-3-flash-preview',
     contents: message,
     config: {
       systemInstruction: SYSTEM_PROMPT,
@@ -80,7 +80,7 @@ Rules:
 - Do NOT repeat common questions`;
 
   const response = await getAI().models.generateContent({
-    model: 'gemini-2.0-flash',
+    model: 'gemini-3-flash-preview',
     contents: prompt,
     config: {
       temperature: 0.9,
