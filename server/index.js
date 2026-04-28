@@ -1,11 +1,12 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({ path: '.env' });
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { createChatSession, streamChatMessage, generateQuizQuestions, translateText } from './gemini.js';
+import { createChatSession, streamChatMessage, streamSingleMessage, generateQuizQuestions, translateText } from './gemini.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -58,6 +59,20 @@ setInterval(() => {
   }
 }, 30 * 60 * 1000);
 
+// --- Helper: Extract meaningful error message ---
+function getErrorMessage(error) {
+  if (error?.status === 429) {
+    return 'API quota exceeded. The free tier limit has been reached. Please wait a minute and try again, or update to a new API key.';
+  }
+  if (error?.status === 403) {
+    return 'API key is invalid or lacks permissions. Please check your GEMINI_API_KEY.';
+  }
+  if (error?.message?.includes('Could not load the default credentials')) {
+    return 'API key configuration error. The server failed to authenticate with the Gemini API.';
+  }
+  return 'An error occurred while generating a response. Please try again.';
+}
+
 // --- API Routes ---
 
 // Health check
@@ -65,7 +80,7 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'healthy', service: 'CivicSage AI', timestamp: new Date().toISOString() });
 });
 
-// Chat endpoint with streaming
+// Chat endpoint with true token-by-token streaming
 app.post('/api/chat', async (req, res) => {
   try {
     const { message, sessionId } = req.body;
@@ -93,33 +108,50 @@ app.post('/api/chat', async (req, res) => {
       chatSessions.set(newId, session);
     }
 
-    // Set up SSE streaming
+    // Set up SSE streaming with no buffering
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
       'X-Session-Id': session.id,
     });
+
+    // Flush headers immediately
+    res.flushHeaders();
 
     // Send session ID first
     res.write(`data: ${JSON.stringify({ type: 'session', sessionId: session.id })}\n\n`);
 
-    // Stream Gemini response
-    const stream = await streamChatMessage(session.chat, cleanMessage);
+    // Stream Gemini response - token by token
+    let usedFallback = false;
+    let stream;
+
+    try {
+      stream = await streamChatMessage(session.chat, cleanMessage);
+    } catch (chatError) {
+      // If chat session fails, try single-turn streaming as fallback
+      console.warn('Chat session failed, using single-turn fallback:', chatError.message?.substring(0, 100));
+      usedFallback = true;
+      stream = await streamSingleMessage(cleanMessage);
+    }
+
     for await (const chunk of stream) {
-      if (chunk.text) {
-        res.write(`data: ${JSON.stringify({ type: 'chunk', text: chunk.text })}\n\n`);
+      const text = chunk.text || chunk.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      if (text) {
+        res.write(`data: ${JSON.stringify({ type: 'chunk', text })}\n\n`);
       }
     }
 
     res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
     res.end();
   } catch (error) {
-    console.error('Chat error:', error);
+    console.error('Chat error:', error.status || '', error.message?.substring(0, 200) || error);
+    const errorMsg = getErrorMessage(error);
     if (!res.headersSent) {
-      res.status(500).json({ error: 'Failed to process chat message. Please try again.' });
+      res.status(error?.status === 429 ? 429 : 500).json({ error: errorMsg });
     } else {
-      res.write(`data: ${JSON.stringify({ type: 'error', error: 'An error occurred. Please try again.' })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'error', error: errorMsg })}\n\n`);
       res.end();
     }
   }
@@ -136,8 +168,8 @@ app.post('/api/quiz', async (req, res) => {
       res.status(500).json({ error: 'Failed to generate quiz questions.' });
     }
   } catch (error) {
-    console.error('Quiz error:', error);
-    res.status(500).json({ error: 'Failed to generate quiz. Please try again.' });
+    console.error('Quiz error:', error.status || '', error.message?.substring(0, 200) || error);
+    res.status(error?.status === 429 ? 429 : 500).json({ error: getErrorMessage(error) });
   }
 });
 
@@ -154,8 +186,8 @@ app.post('/api/translate', async (req, res) => {
     const translated = await translateText(text, targetLanguage);
     res.json({ translated });
   } catch (error) {
-    console.error('Translation error:', error);
-    res.status(500).json({ error: 'Translation failed. Please try again.' });
+    console.error('Translation error:', error.status || '', error.message?.substring(0, 200) || error);
+    res.status(error?.status === 429 ? 429 : 500).json({ error: getErrorMessage(error) });
   }
 });
 
@@ -163,13 +195,13 @@ app.post('/api/translate', async (req, res) => {
 if (process.env.NODE_ENV === 'production') {
   const distPath = join(__dirname, '..', 'dist');
   app.use(express.static(distPath));
-  app.get('*', (req, res) => {
+  app.get('{*path}', (req, res) => {
     res.sendFile(join(distPath, 'index.html'));
   });
 }
 
 // --- Start Server ---
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`🏛️  CivicSage AI server running on port ${PORT}`);
   console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`   Gemini API: ${process.env.GEMINI_API_KEY ? 'Configured ✓' : 'NOT SET ✗'}`);

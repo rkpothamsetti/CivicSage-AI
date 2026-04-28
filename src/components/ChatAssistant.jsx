@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { sendChatMessage } from '../lib/api';
@@ -16,6 +16,7 @@ export default function ChatAssistant({ initialMessage, onMessageSent }) {
   const [sessionId, setSessionId] = useState(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
+  const streamBufferRef = useRef('');
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -28,49 +29,64 @@ export default function ChatAssistant({ initialMessage, onMessageSent }) {
     }
   }, [initialMessage]);
 
-  const handleSend = async (overrideMsg) => {
+  const handleSend = useCallback(async (overrideMsg) => {
     const msg = (overrideMsg || input).trim();
     if (!msg || isLoading) return;
 
     setInput('');
     setMessages((prev) => [...prev, { role: 'user', content: msg }]);
     setIsLoading(true);
+    streamBufferRef.current = '';
 
-    // Add placeholder AI message
-    const aiIndex = messages.length + 1;
+    // Add placeholder AI message with loading state
     setMessages((prev) => [...prev, { role: 'ai', content: '', loading: true }]);
 
     try {
-      let fullText = '';
       await sendChatMessage(
         msg,
         sessionId,
+        // onChunk — called for each token/chunk from the stream
         (chunk) => {
-          fullText += chunk;
+          streamBufferRef.current += chunk;
+          const currentText = streamBufferRef.current;
           setMessages((prev) => {
             const updated = [...prev];
-            updated[updated.length - 1] = { role: 'ai', content: fullText, loading: false };
+            updated[updated.length - 1] = {
+              role: 'ai',
+              content: currentText,
+              loading: false,
+            };
             return updated;
           });
         },
+        // onSessionId
         (newSessionId) => {
           setSessionId(newSessionId);
         }
       );
     } catch (error) {
+      console.error('Chat error:', error.message);
+      const errorMsg = error.message.includes('quota')
+        ? '⚠️ **API Quota Exceeded**\n\nThe Gemini API free tier limit has been reached. Please wait ~60 seconds and try again, or update to a new API key.'
+        : error.message.includes('API key')
+        ? '🔑 **API Key Error**\n\nThe Gemini API key is invalid or misconfigured. Please check the server configuration.'
+        : `❌ **Error:** ${error.message}`;
+
       setMessages((prev) => {
         const updated = [...prev];
         updated[updated.length - 1] = {
           role: 'ai',
-          content: '❌ Sorry, I encountered an error. Please try again.',
+          content: errorMsg,
           loading: false,
+          isError: true,
         };
         return updated;
       });
     } finally {
       setIsLoading(false);
+      streamBufferRef.current = '';
     }
-  };
+  }, [input, isLoading, sessionId]);
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -90,7 +106,7 @@ export default function ChatAssistant({ initialMessage, onMessageSent }) {
       <div className="chat-container">
         <div className="chat-messages">
           {messages.map((msg, i) => (
-            <div key={i} className={`chat-message ${msg.role}`}>
+            <div key={i} className={`chat-message ${msg.role}${msg.isError ? ' error' : ''}`}>
               <div className="chat-avatar">
                 {msg.role === 'user' ? '👤' : '🏛️'}
               </div>
@@ -138,7 +154,7 @@ export default function ChatAssistant({ initialMessage, onMessageSent }) {
             onClick={() => handleSend()}
             disabled={isLoading || !input.trim()}
           >
-            ➤
+            {isLoading ? '⏳' : '➤'}
           </button>
         </div>
       </div>

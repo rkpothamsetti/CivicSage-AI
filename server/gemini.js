@@ -1,13 +1,23 @@
 import { GoogleGenAI } from '@google/genai';
 import { SYSTEM_PROMPT } from './electionData.js';
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+let _ai = null;
+function getAI() {
+  if (!_ai) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error('GEMINI_API_KEY environment variable is not set');
+    }
+    _ai = new GoogleGenAI({ apiKey });
+  }
+  return _ai;
+}
 
 /**
  * Create a new chat session with election-focused system prompt.
  */
 export function createChatSession() {
-  const chat = ai.chats.create({
+  const chat = getAI().chats.create({
     model: 'gemini-2.0-flash',
     config: {
       systemInstruction: SYSTEM_PROMPT,
@@ -21,9 +31,28 @@ export function createChatSession() {
 
 /**
  * Send a message to an existing chat session and stream the response.
+ * Uses generateContentStream for true token-by-token streaming.
  */
 export async function streamChatMessage(chat, message) {
   const response = await chat.sendMessageStream({ message });
+  return response;
+}
+
+/**
+ * Single-turn streaming response (no chat history needed).
+ * This is more reliable for one-off questions.
+ */
+export async function streamSingleMessage(message) {
+  const response = await getAI().models.generateContentStream({
+    model: 'gemini-2.0-flash',
+    contents: message,
+    config: {
+      systemInstruction: SYSTEM_PROMPT,
+      temperature: 0.7,
+      topP: 0.9,
+      maxOutputTokens: 2048,
+    },
+  });
   return response;
 }
 
@@ -50,7 +79,7 @@ Rules:
 - Difficulty: mix of easy, medium, and hard
 - Do NOT repeat common questions`;
 
-  const response = await ai.models.generateContent({
+  const response = await getAI().models.generateContent({
     model: 'gemini-2.0-flash',
     contents: prompt,
     config: {
@@ -82,7 +111,7 @@ export async function translateText(text, targetLanguage) {
 Text to translate:
 ${text}`;
 
-  const response = await ai.models.generateContent({
+  const response = await getAI().models.generateContent({
     model: 'gemini-2.0-flash',
     contents: prompt,
     config: {

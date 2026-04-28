@@ -1,12 +1,16 @@
 /**
  * API client helpers for CivicSage AI
+ * Handles SSE streaming for real-time token-by-token display
  */
 
 /**
  * Send a chat message and handle SSE streaming response.
+ * Each token chunk is immediately passed to the onChunk callback
+ * for real-time display with minimal latency.
+ *
  * @param {string} message - User's message
  * @param {string|null} sessionId - Existing session ID (or null for new)
- * @param {function} onChunk - Callback for each text chunk
+ * @param {function} onChunk - Callback for each text chunk (called per token)
  * @param {function} onSessionId - Callback when session ID is received
  * @returns {Promise<void>}
  */
@@ -17,11 +21,19 @@ export async function sendChatMessage(message, sessionId, onChunk, onSessionId) 
     body: JSON.stringify({ message, sessionId }),
   });
 
+  // Handle non-streaming error responses (400, 429, 500 etc.)
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.error || 'Failed to send message');
+    let errorMsg = 'Failed to send message';
+    try {
+      const err = await response.json();
+      errorMsg = err.error || errorMsg;
+    } catch {
+      // Response wasn't JSON
+    }
+    throw new Error(errorMsg);
   }
 
+  // Use ReadableStream for low-latency streaming
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -31,24 +43,42 @@ export async function sendChatMessage(message, sessionId, onChunk, onSessionId) 
     if (done) break;
 
     buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
 
-    for (const line of lines) {
-      if (line.startsWith('data: ')) {
+    // Process all complete SSE events in the buffer
+    const events = buffer.split('\n\n');
+    // Keep the last potentially incomplete event in the buffer
+    buffer = events.pop() || '';
+
+    for (const event of events) {
+      const lines = event.split('\n');
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+
+        const jsonStr = line.slice(6);
+        if (!jsonStr) continue;
+
         try {
-          const data = JSON.parse(line.slice(6));
-          if (data.type === 'session' && onSessionId) {
-            onSessionId(data.sessionId);
-          } else if (data.type === 'chunk' && onChunk) {
-            onChunk(data.text);
-          } else if (data.type === 'error') {
-            throw new Error(data.error);
+          const data = JSON.parse(jsonStr);
+
+          switch (data.type) {
+            case 'session':
+              if (onSessionId) onSessionId(data.sessionId);
+              break;
+            case 'chunk':
+              if (onChunk && data.text) onChunk(data.text);
+              break;
+            case 'done':
+              // Stream complete
+              break;
+            case 'error':
+              throw new Error(data.error || 'Server error occurred');
           }
-        } catch (e) {
-          if (e.message !== 'Unexpected end of JSON input') {
-            console.error('SSE parse error:', e);
+        } catch (parseErr) {
+          // Re-throw actual application errors
+          if (parseErr.message && !parseErr.message.includes('JSON')) {
+            throw parseErr;
           }
+          // Silently skip JSON parse errors (incomplete chunks)
         }
       }
     }
@@ -68,7 +98,12 @@ export async function generateQuiz(topic) {
   });
 
   if (!response.ok) {
-    throw new Error('Failed to generate quiz');
+    let errorMsg = 'Failed to generate quiz';
+    try {
+      const err = await response.json();
+      errorMsg = err.error || errorMsg;
+    } catch {}
+    throw new Error(errorMsg);
   }
 
   const data = await response.json();
@@ -89,7 +124,12 @@ export async function translateTextApi(text, targetLanguage) {
   });
 
   if (!response.ok) {
-    throw new Error('Translation failed');
+    let errorMsg = 'Translation failed';
+    try {
+      const err = await response.json();
+      errorMsg = err.error || errorMsg;
+    } catch {}
+    throw new Error(errorMsg);
   }
 
   const data = await response.json();
