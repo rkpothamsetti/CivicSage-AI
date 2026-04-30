@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import PropTypes from 'prop-types';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import DOMPurify from 'dompurify';
 import { sendChatMessage } from '../lib/api';
 import { SUGGESTED_PROMPTS } from '../lib/constants';
 import { trackChatMessage } from '../lib/analytics';
@@ -135,7 +136,9 @@ export default function ChatAssistant({ initialMessage, onMessageSent }) {
                     <span className="typing-dot" aria-hidden="true"></span>
                   </div>
                 ) : msg.role === 'ai' ? (
-                  <ReactMarkdown remarkPlugins={remarkPlugins}>{msg.content}</ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={remarkPlugins}>
+                    {DOMPurify.sanitize(msg.content)}
+                  </ReactMarkdown>
                 ) : (
                   msg.content
                 )}

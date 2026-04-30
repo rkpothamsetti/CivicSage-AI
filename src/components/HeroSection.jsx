@@ -41,6 +41,10 @@ export default function HeroSection({ onStartChat, onExploreTimeline }) {
           >
             💬 Ask the AI Assistant
           </button>
+          <p className="hero-subtitle">
+            Addressing the <strong>Civic Education Problem Statement</strong> for PromptWars Challenge Two. 
+            Learn about voter registration, EVMs, and the electoral timeline through AI.
+          </p>
           <button
             id="hero-explore-timeline"
             className="btn-secondary"
