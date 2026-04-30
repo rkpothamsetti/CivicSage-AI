@@ -1,8 +1,10 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import PropTypes from 'prop-types';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { sendChatMessage } from '../lib/api';
 import { SUGGESTED_PROMPTS } from '../lib/constants';
+import { trackChatMessage } from '../lib/analytics';
 
 export default function ChatAssistant({ initialMessage, onMessageSent }) {
   const [messages, setMessages] = useState([
@@ -37,6 +39,9 @@ export default function ChatAssistant({ initialMessage, onMessageSent }) {
     setMessages((prev) => [...prev, { role: 'user', content: msg }]);
     setIsLoading(true);
     streamBufferRef.current = '';
+
+    // Track the chat message event
+    trackChatMessage(msg.length);
 
     // Add placeholder AI message with loading state
     setMessages((prev) => [...prev, { role: 'ai', content: '', loading: true }]);
@@ -88,37 +93,49 @@ export default function ChatAssistant({ initialMessage, onMessageSent }) {
     }
   }, [input, isLoading, sessionId]);
 
-  const handleKeyDown = (e) => {
+  const handleKeyDown = useCallback((e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
     }
-  };
+  }, [handleSend]);
+
+  /** Memoize the markdown plugins array to prevent re-renders */
+  const remarkPlugins = useMemo(() => [remarkGfm], []);
 
   return (
     <div>
       <div className="section-header">
-        <h2>🤖 AI Election Assistant</h2>
+        <h2 id="chat-heading">🤖 AI Election Assistant</h2>
         <p>Ask anything about the Indian election process — powered by Google Gemini</p>
-        <div className="section-divider"></div>
+        <div className="section-divider" aria-hidden="true"></div>
       </div>
 
-      <div className="chat-container">
-        <div className="chat-messages">
+      <div className="chat-container" role="region" aria-labelledby="chat-heading">
+        <div
+          className="chat-messages"
+          role="log"
+          aria-live="polite"
+          aria-label="Chat conversation"
+        >
           {messages.map((msg, i) => (
-            <div key={i} className={`chat-message ${msg.role}${msg.isError ? ' error' : ''}`}>
-              <div className="chat-avatar">
+            <div
+              key={i}
+              className={`chat-message ${msg.role}${msg.isError ? ' error' : ''}`}
+              aria-label={`${msg.role === 'user' ? 'Your message' : 'AI response'}`}
+            >
+              <div className="chat-avatar" aria-hidden="true">
                 {msg.role === 'user' ? '👤' : '🏛️'}
               </div>
               <div className="chat-bubble">
                 {msg.loading ? (
-                  <div className="typing-indicator">
-                    <span className="typing-dot"></span>
-                    <span className="typing-dot"></span>
-                    <span className="typing-dot"></span>
+                  <div className="typing-indicator" role="status" aria-label="AI is typing">
+                    <span className="typing-dot" aria-hidden="true"></span>
+                    <span className="typing-dot" aria-hidden="true"></span>
+                    <span className="typing-dot" aria-hidden="true"></span>
                   </div>
                 ) : msg.role === 'ai' ? (
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={remarkPlugins}>{msg.content}</ReactMarkdown>
                 ) : (
                   msg.content
                 )}
@@ -129,9 +146,16 @@ export default function ChatAssistant({ initialMessage, onMessageSent }) {
         </div>
 
         {messages.length <= 1 && (
-          <div className="suggested-prompts">
+          <div className="suggested-prompts" role="list" aria-label="Suggested questions">
             {SUGGESTED_PROMPTS.map((prompt, i) => (
-              <button key={i} className="suggested-btn" onClick={() => handleSend(prompt)}>
+              <button
+                key={i}
+                id={`suggested-prompt-${i}`}
+                className="suggested-btn"
+                onClick={() => handleSend(prompt)}
+                role="listitem"
+                aria-label={`Ask: ${prompt}`}
+              >
                 {prompt}
               </button>
             ))}
@@ -141,6 +165,7 @@ export default function ChatAssistant({ initialMessage, onMessageSent }) {
         <div className="chat-input-area">
           <textarea
             ref={inputRef}
+            id="chat-input-field"
             className="chat-input"
             placeholder="Ask about Indian elections..."
             value={input}
@@ -148,11 +173,14 @@ export default function ChatAssistant({ initialMessage, onMessageSent }) {
             onKeyDown={handleKeyDown}
             rows={1}
             disabled={isLoading}
+            aria-label="Type your question about Indian elections"
           />
           <button
+            id="chat-send-btn"
             className="chat-send"
             onClick={() => handleSend()}
             disabled={isLoading || !input.trim()}
+            aria-label={isLoading ? 'Sending message...' : 'Send message'}
           >
             {isLoading ? '⏳' : '➤'}
           </button>
@@ -161,3 +189,10 @@ export default function ChatAssistant({ initialMessage, onMessageSent }) {
     </div>
   );
 }
+
+ChatAssistant.propTypes = {
+  /** Pre-filled message to send immediately on mount */
+  initialMessage: PropTypes.string,
+  /** Callback after the initial message has been sent */
+  onMessageSent: PropTypes.func,
+};

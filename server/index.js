@@ -3,10 +3,12 @@ dotenv.config({ path: '.env' });
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
+import compression from 'compression';
 import rateLimit from 'express-rate-limit';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { createChatSession, streamChatMessage, streamSingleMessage, generateQuizQuestions, translateText } from './gemini.js';
+import { requestLoggingMiddleware, logEvent, logError, getPublicConfig } from './googleServices.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -14,17 +16,23 @@ const __dirname = dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// --- Performance Middleware ---
+app.use(compression());
+
+// --- Google Cloud Logging Middleware ---
+app.use(requestLoggingMiddleware());
+
 // --- Security Middleware ---
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", "https://maps.googleapis.com"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "https://maps.googleapis.com", "https://www.googletagmanager.com", "https://www.google-analytics.com"],
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:", "https:", "blob:"],
       frameSrc: ["'self'", "https://www.google.com", "https://maps.google.com"],
-      connectSrc: ["'self'"],
+      connectSrc: ["'self'", "https://www.google-analytics.com", "https://analytics.google.com"],
     },
   },
   crossOriginEmbedderPolicy: false,
@@ -52,10 +60,15 @@ const chatSessions = new Map();
 // Cleanup old sessions every 30 minutes
 setInterval(() => {
   const now = Date.now();
+  let cleaned = 0;
   for (const [id, session] of chatSessions) {
     if (now - session.lastUsed > 30 * 60 * 1000) {
       chatSessions.delete(id);
+      cleaned++;
     }
+  }
+  if (cleaned > 0) {
+    logEvent('session_cleanup', { sessionsRemoved: cleaned, remaining: chatSessions.size });
   }
 }, 30 * 60 * 1000);
 
@@ -75,13 +88,21 @@ function getErrorMessage(error) {
 
 // --- API Routes ---
 
-// Health check
+// Health check with cache headers
 app.get('/api/health', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=30');
   res.json({ status: 'healthy', service: 'CivicSage AI', timestamp: new Date().toISOString() });
+});
+
+// Public config endpoint — serves non-secret configuration to the frontend
+app.get('/api/config', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=300');
+  res.json(getPublicConfig());
 });
 
 // Chat endpoint with true token-by-token streaming
 app.post('/api/chat', async (req, res) => {
+  const startTime = Date.now();
   try {
     const { message, sessionId } = req.body;
 
@@ -131,7 +152,7 @@ app.post('/api/chat', async (req, res) => {
       stream = await streamChatMessage(session.chat, cleanMessage);
     } catch (chatError) {
       // If chat session fails, try single-turn streaming as fallback
-      console.warn('Chat session failed, using single-turn fallback:', chatError.message?.substring(0, 100));
+      logError('chat_stream', chatError, { sessionId: session.id, fallback: true });
       usedFallback = true;
       stream = await streamSingleMessage(cleanMessage);
     }
@@ -145,8 +166,16 @@ app.post('/api/chat', async (req, res) => {
 
     res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
     res.end();
+
+    // Log successful chat interaction
+    logEvent('chat_message', {
+      sessionId: session.id,
+      messageLength: cleanMessage.length,
+      responseTime: `${Date.now() - startTime}ms`,
+      usedFallback,
+    });
   } catch (error) {
-    console.error('Chat error:', error.status || '', error.message?.substring(0, 200) || error);
+    logError('chat_endpoint', error, { responseTime: `${Date.now() - startTime}ms` });
     const errorMsg = getErrorMessage(error);
     if (!res.headersSent) {
       res.status(error?.status === 429 ? 429 : 500).json({ error: errorMsg });
@@ -159,22 +188,25 @@ app.post('/api/chat', async (req, res) => {
 
 // Quiz generation endpoint
 app.post('/api/quiz', async (req, res) => {
+  const startTime = Date.now();
   try {
     const { topic } = req.body;
     const questions = await generateQuizQuestions(topic || 'Indian election process');
     if (questions) {
+      logEvent('quiz_generated', { topic: topic || 'default', questionCount: questions.length, responseTime: `${Date.now() - startTime}ms` });
       res.json({ questions });
     } else {
       res.status(500).json({ error: 'Failed to generate quiz questions.' });
     }
   } catch (error) {
-    console.error('Quiz error:', error.status || '', error.message?.substring(0, 200) || error);
+    logError('quiz_endpoint', error);
     res.status(error?.status === 429 ? 429 : 500).json({ error: getErrorMessage(error) });
   }
 });
 
 // Translation endpoint
 app.post('/api/translate', async (req, res) => {
+  const startTime = Date.now();
   try {
     const { text, targetLanguage } = req.body;
     if (!text || !targetLanguage) {
@@ -184,9 +216,10 @@ app.post('/api/translate', async (req, res) => {
       return res.status(400).json({ error: 'Text too long. Maximum 5000 characters.' });
     }
     const translated = await translateText(text, targetLanguage);
+    logEvent('translation', { targetLanguage, textLength: text.length, responseTime: `${Date.now() - startTime}ms` });
     res.json({ translated });
   } catch (error) {
-    console.error('Translation error:', error.status || '', error.message?.substring(0, 200) || error);
+    logError('translate_endpoint', error);
     res.status(error?.status === 429 ? 429 : 500).json({ error: getErrorMessage(error) });
   }
 });
@@ -194,7 +227,10 @@ app.post('/api/translate', async (req, res) => {
 // --- Serve Static Files (production) ---
 if (process.env.NODE_ENV === 'production') {
   const distPath = join(__dirname, '..', 'dist');
-  app.use(express.static(distPath));
+  app.use(express.static(distPath, {
+    maxAge: '1d',
+    etag: true,
+  }));
   app.get('{*path}', (req, res) => {
     res.sendFile(join(distPath, 'index.html'));
   });
@@ -205,4 +241,5 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🏛️  CivicSage AI server running on port ${PORT}`);
   console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`   Gemini API: ${process.env.GEMINI_API_KEY ? 'Configured ✓' : 'NOT SET ✗'}`);
+  logEvent('server_start', { port: PORT, environment: process.env.NODE_ENV || 'development' });
 });

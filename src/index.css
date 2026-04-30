@@ -53,6 +53,15 @@ button {
   transition: all 0.25s ease;
 }
 
+/* === SKIP LINK (Accessibility) === */
+.skip-link {
+  position: absolute; top: -100px; left: 16px; z-index: 9999;
+  background: var(--accent-violet); color: #fff; padding: 12px 24px;
+  border-radius: var(--radius-md); font-weight: 600; font-size: 0.9rem;
+  transition: top 0.2s ease;
+}
+.skip-link:focus { top: 12px; outline: 2px solid #fff; }
+
 /* === GLASSMORPHIC CARD === */
 .glass-card {
   background: var(--glass-bg);
